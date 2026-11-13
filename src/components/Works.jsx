@@ -36,72 +36,161 @@ export default function Works({ srcs }) {
         })
       })
 
-      // Cursor-follow preview (fine pointers only)
+      // Cursor-follow preview (fine pointers only).
+      //
+      // Which row is "hovered" is worked out from geometry — the last known
+      // cursor position against the row rects — on every pointer move AND every
+      // scroll. Browsers don't fire enter/leave events while content scrolls
+      // under a still cursor, so relying on them leaves the card stranded on
+      // screen and makes it swap in bursts during fast scrolling.
       mm.add('(hover: hover) and (pointer: fine)', () => {
+        const list = el.querySelector('.works__list')
+        const label = float.querySelector('.float__label')
+        const imgs = items.map((it) => it.querySelector('img'))
+        const HIDDEN = 'inset(100% 0% 0% 0%)'
+        const FAST_SCROLL = 22 // px per 60fps frame — above this the card steps aside
+
         gsap.set(float, { xPercent: -50, yPercent: -50, scale: 0.6, autoAlpha: 0 })
-        gsap.set(items, { clipPath: 'inset(100% 0% 0% 0%)' })
+        gsap.set(items, { clipPath: HIDDEN, zIndex: 1 })
         const qx = gsap.quickTo(float, 'x', { duration: 0.75, ease: 'power3.out' })
         const qy = gsap.quickTo(float, 'y', { duration: 0.75, ease: 'power3.out' })
         const qr = gsap.quickTo(float, 'rotation', { duration: 0.9, ease: 'power3.out' })
+
+        const pointer = { x: 0, y: 0, known: false }
         let lastX = null
         let vel = 0
         let current = -1
+        let visible = false
+
+        const reveal = () => {
+          if (visible) return
+          visible = true
+          list.classList.add('is-hovering')
+          // Appear at the cursor rather than flying in from where it last was.
+          qx(pointer.x, pointer.x)
+          qy(pointer.y, pointer.y)
+          gsap.to(float, { autoAlpha: 1, scale: 1, duration: 0.7, ease: EASE.out, overwrite: 'auto' })
+          gsap.to(label, { autoAlpha: 1, duration: 0.3, overwrite: 'auto' })
+        }
+
+        const conceal = () => {
+          if (!visible) return
+          visible = false
+          current = -1
+          list.classList.remove('is-hovering')
+          rows.forEach((r) => r.classList.remove('is-active'))
+          gsap.to(float, {
+            autoAlpha: 0,
+            scale: 0.6,
+            duration: 0.45,
+            ease: 'power3.in',
+            overwrite: 'auto',
+            // Reset the stack only if we're still hidden once the fade is done.
+            onComplete: () => {
+              if (visible) return
+              gsap.killTweensOf(items)
+              gsap.set(items, { clipPath: HIDDEN, zIndex: 1 })
+            },
+          })
+        }
+
+        const show = (i) => {
+          if (i === current) return
+          const prev = current
+          current = i
+          rows.forEach((r, k) => r.classList.toggle('is-active', k === i))
+          // Stack: everything else at the bottom, the outgoing image in the
+          // middle (stays fully drawn underneath), the incoming one on top.
+          items.forEach((it, k) => gsap.set(it, { zIndex: k === i ? 3 : k === prev ? 2 : 1 }))
+          gsap.killTweensOf([items[i], imgs[i]])
+          gsap.fromTo(
+            items[i],
+            { clipPath: prev < 0 || prev < i ? 'inset(100% 0% 0% 0%)' : 'inset(0% 0% 100% 0%)' },
+            {
+              clipPath: 'inset(0% 0% 0% 0%)',
+              duration: 0.75,
+              ease: EASE.out,
+              // Once covered, clear the images underneath so none linger.
+              onComplete: () => {
+                if (current !== i) return
+                items.forEach((it, k) => k !== i && gsap.set(it, { clipPath: HIDDEN }))
+              },
+            },
+          )
+          gsap.fromTo(imgs[i], { scale: 1.35 }, { scale: 1, duration: 1.1, ease: EASE.out })
+        }
+
+        // Hit-test the cursor against the list and its rows.
+        const sync = (fast = false) => {
+          if (!pointer.known) return
+          const box = list.getBoundingClientRect()
+          const inside =
+            pointer.x >= box.left && pointer.x <= box.right && pointer.y >= box.top && pointer.y <= box.bottom
+          if (!inside || fast) return conceal()
+          const i = rows.findIndex((r) => {
+            const b = r.getBoundingClientRect()
+            return pointer.y >= b.top && pointer.y < b.bottom
+          })
+          if (i < 0) return // on a hairline between rows: keep what's showing
+          reveal()
+          show(i)
+        }
 
         const onMove = (e) => {
-          qx(e.clientX)
-          qy(e.clientY)
+          if (e.pointerType === 'touch') return
+          pointer.x = e.clientX
+          pointer.y = e.clientY
+          pointer.known = true
+          if (visible) {
+            qx(e.clientX)
+            qy(e.clientY)
+          }
           if (lastX !== null) vel += e.clientX - lastX
           lastX = e.clientX
+          sync()
         }
+        // Scroll events stop once the page settles — re-check then, so a card
+        // hidden for a fast scroll comes back if the cursor ends up on a row.
+        const settle = gsap.delayedCall(0.12, () => sync()).pause()
+        let lastScrollY = window.scrollY
+        let lastScrollT = performance.now()
+        const onScroll = () => {
+          const now = performance.now()
+          const speed = (Math.abs(window.scrollY - lastScrollY) / Math.max(now - lastScrollT, 1)) * 16.67
+          lastScrollY = window.scrollY
+          lastScrollT = now
+          sync(speed > FAST_SCROLL)
+          settle.restart(true)
+        }
+        const onResize = () => sync()
+        const onLeaveWindow = () => {
+          pointer.known = false
+          lastX = null
+          conceal()
+        }
+
         // Lean follows horizontal velocity and settles back to upright.
         const lean = () => {
           vel *= Math.pow(0.82, gsap.ticker.deltaRatio(60))
           qr(gsap.utils.clamp(-10, 10, vel * 0.3))
         }
-        gsap.ticker.add(lean)
-        const show = (i) => {
-          if (i === current) return
-          const prev = current
-          current = i
-          gsap.set(items[i], { zIndex: 2 })
-          gsap.fromTo(
-            items[i],
-            { clipPath: prev < 0 || prev < i ? 'inset(100% 0% 0% 0%)' : 'inset(0% 0% 100% 0%)' },
-            { clipPath: 'inset(0% 0% 0% 0%)', duration: 0.75, ease: EASE.out, overwrite: true },
-          )
-          gsap.fromTo(items[i].querySelector('img'), { scale: 1.35 }, { scale: 1, duration: 1.1, ease: EASE.out, overwrite: true })
-          if (prev >= 0) {
-            gsap.set(items[prev], { zIndex: 1 })
-            gsap.to(items[prev], { clipPath: 'inset(0% 0% 0% 0%)', duration: 0.8, onComplete: () => current !== prev && gsap.set(items[prev], { clipPath: 'inset(100% 0% 0% 0%)' }) })
-          }
-          gsap.to(float.querySelector('.float__label'), { autoAlpha: 1, duration: 0.3 })
-        }
-        const enterList = (e) => {
-          qx(e.clientX)
-          qy(e.clientY)
-          gsap.to(float, { autoAlpha: 1, scale: 1, duration: 0.7, ease: EASE.out })
-        }
-        const leaveList = () => {
-          gsap.to(float, { autoAlpha: 0, scale: 0.6, duration: 0.5, ease: 'power3.in' })
-          if (current >= 0) gsap.set(items[current], { clipPath: 'inset(100% 0% 0% 0%)', delay: 0.5 })
-          current = -1
-        }
 
-        const list = el.querySelector('.works__list')
-        list.addEventListener('pointermove', onMove)
-        list.addEventListener('pointerenter', enterList)
-        list.addEventListener('pointerleave', leaveList)
-        const handlers = rows.map((r, i) => {
-          const h = () => show(i)
-          r.addEventListener('pointerenter', h)
-          return h
-        })
+        gsap.ticker.add(lean)
+        window.addEventListener('pointermove', onMove, { passive: true })
+        window.addEventListener('scroll', onScroll, { passive: true })
+        window.addEventListener('resize', onResize)
+        window.addEventListener('blur', onLeaveWindow)
+        document.documentElement.addEventListener('pointerleave', onLeaveWindow)
         return () => {
           gsap.ticker.remove(lean)
-          list.removeEventListener('pointermove', onMove)
-          list.removeEventListener('pointerenter', enterList)
-          list.removeEventListener('pointerleave', leaveList)
-          rows.forEach((r, i) => r.removeEventListener('pointerenter', handlers[i]))
+          window.removeEventListener('pointermove', onMove)
+          window.removeEventListener('scroll', onScroll)
+          settle.kill()
+          window.removeEventListener('resize', onResize)
+          window.removeEventListener('blur', onLeaveWindow)
+          document.documentElement.removeEventListener('pointerleave', onLeaveWindow)
+          list.classList.remove('is-hovering')
+          rows.forEach((r) => r.classList.remove('is-active'))
         }
       })
     },
